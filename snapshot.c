@@ -1,7 +1,20 @@
 #include <lua.h>
 #include <lauxlib.h>
 
+#include <stdlib.h>
+
 static void mark_object(lua_State *L, lua_State *dL, const void * parent, const char * desc);
+
+
+
+#define TABLE 1
+#define FUNCTION 2
+#define SOURCE 3
+#define THREAD 4
+#define USERDATA 5
+#define MARK 6
+#define TBL 7
+
 
 #if LUA_VERSION_NUM == 501
 
@@ -53,16 +66,122 @@ mark_function_env(lua_State *L, lua_State *dL, const void * t) {
 
 #endif
 
+
+static void
+mark_table_child(lua_State *dL, const void * parent) {
+	lua_rawgetp(dL, TBL, parent);
+	if (lua_isnil(dL,-1)) {
+		lua_pop(dL,1);
+		lua_newtable(dL);
+		lua_pushstring(dL, "num");
+		lua_pushinteger(dL, 1);
+		lua_settable(dL, -3);
+		lua_pushstring(dL, "desc");
+		lua_pushstring(dL, "");
+		lua_settable(dL, -3);
+		lua_rawsetp(dL, TBL, parent);
+		return;
+	}
+	if (!lua_istable(dL, -1)) {
+	 	lua_pop(dL,1);
+	 	return;
+	}
+	lua_pushstring(dL, "num");
+	lua_rawget(dL, -2);
+	if (!lua_isnumber(dL, -1)) {
+		fprintf(stderr, "mark_table_child fail\n" );
+		lua_pop(dL,3);
+		return;
+	}
+	int num = lua_tointeger(dL, -1);
+	lua_pushinteger(dL, num+1);
+	lua_setfield(dL, -3, "num");
+	lua_pop(dL, 1);
+	lua_rawsetp(dL, TBL, parent);
+}
+
+static void
+mark_table_desc(lua_State *dL, const void * parent, const char* desc) {
+	lua_rawgetp(dL, TBL, parent);
+	if (lua_isnil(dL,-1)) {
+		lua_pop(dL,1);
+		lua_newtable(dL);
+		lua_pushstring(dL, "num");
+		lua_pushinteger(dL, 0);
+		lua_settable(dL, -3);
+		lua_pushstring(dL, "desc");
+		lua_pushstring(dL, desc);
+		lua_settable(dL, -3);
+		lua_rawsetp(dL, TBL, parent);
+		return;
+	}
+	if (!lua_istable(dL, -1)) {
+	 	lua_pop(dL,1);
+	 	return;
+	}
+
+	lua_pushstring(dL, desc);
+	lua_setfield(dL, -2, "desc");
+	lua_pop(dL, 1);
+	lua_rawsetp(dL, TBL, parent);
+}
+
+typedef struct 
+{
+	void * p;
+	int num;
+	char* desc;
+} s_table;
+
+typedef struct
+{
+	s_table tbl;
+	s_table* next;
+} s_table_p;
+
+static void
+gen_tbl_desc(lua_State *L, lua_State *dL) {
+	// fprintf(stderr, "gen_tbl_desc\n");
+	lua_newtable(L);
+	lua_pushnil(dL);
+	int i = 1;
+	while (lua_next(dL, TBL) != 0) {
+		if (lua_istable(dL, -1)) {
+			const void * p = lua_topointer(dL, -2);
+			lua_pushliteral(dL, "num");
+			lua_rawget(dL, -2);
+			int num = (int) lua_tonumber(dL, -1);
+			lua_pop(dL,1);
+			lua_pushliteral(dL, "desc");
+			lua_rawget(dL, -2);
+			const char * desc = lua_tostring(dL, -1);
+			// fprintf(stderr, "mark_table_child %p = %d = %s\n" , p, num, desc);
+			lua_pushinteger(L, i++);
+			lua_newtable(L);
+			lua_pushstring(L, "parent");
+			lua_pushlightuserdata(L, (void *)p);
+			lua_settable(L, -3);
+			lua_pushstring(L, "num");
+			lua_pushinteger(L, num);
+			lua_settable(L, -3);
+			lua_pushstring(L, "desc");
+			lua_pushstring(L, desc);
+			lua_settable(L, -3);
+
+			lua_settable(L, -3);
+
+			lua_pop(dL,1);
+		}
+		
+		lua_pop(dL,1);
+	}
+}
+
+
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 
-#define TABLE 1
-#define FUNCTION 2
-#define SOURCE 3
-#define THREAD 4
-#define USERDATA 5
-#define MARK 6
 
 static bool
 ismarked(lua_State *dL, const void *p) {
@@ -145,7 +264,7 @@ mark_table(lua_State *L, lua_State *dL, const void * parent, const char * desc) 
 	const void * t = readobject(L, dL, parent, desc);
 	if (t == NULL)
 		return;
-
+	mark_table_desc(dL, t, desc);
 	bool weakk = false;
 	bool weakv = false;
 	if (lua_getmetatable(L, -1)) {
@@ -325,6 +444,7 @@ count_table(lua_State *L, int idx) {
 
 static void
 gen_table_desc(lua_State *dL, luaL_Buffer *b, const void * parent, const char *desc) {
+	mark_table_child(dL, parent);
 	char tmp[32];
 	size_t l = sprintf(tmp,"%p : ",parent);
 	luaL_addlstring(b, tmp, l);
@@ -392,14 +512,15 @@ static int
 snapshot(lua_State *L) {
 	int i;
 	lua_State *dL = luaL_newstate();
-	for (i=0;i<MARK;i++) {
+	for (i=0;i<TBL;i++) {
 		lua_newtable(dL);
 	}
 	lua_pushvalue(L, LUA_REGISTRYINDEX);
 	mark_table(L, dL, NULL, "[registry]");
 	gen_result(L, dL);
+	gen_tbl_desc(L, dL);
 	lua_close(dL);
-	return 1;
+	return 2;
 }
 
 int
